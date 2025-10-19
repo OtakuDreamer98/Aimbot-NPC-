@@ -1,215 +1,216 @@
---[[
-	WARNING: Heads up! This script has not been verified by ScriptBlox. Use at your own risk!
-]]
-local fov = 120 -- Reduced from 136 to make the FOV ring smaller
+--[[ Aim Assist with Efficient Raycasting ]]
+local fov = 120
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
 local Cam = workspace.CurrentCamera
-local Player = game:GetService("Players").LocalPlayer
 
+-- Drawing circle
 local FOVring = Drawing.new("Circle")
 FOVring.Visible = false
 FOVring.Thickness = 2
-FOVring.Color = Color3.fromRGB(255, 255, 255) -- Changed to white
+FOVring.Color = Color3.fromRGB(255,255,255)
 FOVring.Filled = false
 FOVring.Radius = fov
 FOVring.Position = Cam.ViewportSize / 2
 
-local isAiming = false
-local validNPCs = {}
-local raycastParams = RaycastParams.new()
-raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
-
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Parent = game.CoreGui
-
-local ToggleButton = Instance.new("TextButton")
+-- GUI
+local ScreenGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+local ToggleButton = Instance.new("TextButton", ScreenGui)
 ToggleButton.Size = UDim2.new(0, 120, 0, 40)
 ToggleButton.Position = UDim2.new(0, 10, 0, 10)
-ToggleButton.Text = "AIMBOT: OFF"
-ToggleButton.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-ToggleButton.TextColor3 = Color3.fromRGB(255, 50, 50)
+ToggleButton.Text = "AIMASSIST: OFF"
+ToggleButton.BackgroundColor3 = Color3.fromRGB(30,30,30)
+ToggleButton.TextColor3 = Color3.fromRGB(255,50,50)
 ToggleButton.Font = Enum.Font.GothamBold
 ToggleButton.TextSize = 14
-ToggleButton.Parent = ScreenGui
 
+-- State
+local isAiming = false
+local validNPCs = {}
+local visibleNPCs = {}
+local raycastParams = RaycastParams.new()
+raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+raycastParams.IgnoreWater = true
+
+local UPDATE_NPC_INTERVAL = 0.5
+local UPDATE_RAYCAST_INTERVAL = 0.2
+local lastNPCUpdate = 0
+local lastRayUpdate = 0
+
+-- Utility
 local function isNPC(obj)
-    return obj:IsA("Model") 
-        and obj:FindFirstChild("Humanoid")
-        and obj.Humanoid.Health > 0
-        and obj:FindFirstChild("Head")
-        and obj:FindFirstChild("HumanoidRootPart")
-        and not game:GetService("Players"):GetPlayerFromCharacter(obj)
+	return obj and obj:IsA("Model")
+		and obj:FindFirstChild("Humanoid")
+		and obj.Humanoid.Health > 0
+		and obj:FindFirstChild("Head")
+		and obj:FindFirstChild("HumanoidRootPart")
+		and not Players:GetPlayerFromCharacter(obj)
 end
 
 local function updateNPCs()
-    local tempTable = {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if isNPC(obj) then
-            tempTable[obj] = true
-        end
-    end
-    for i = #validNPCs, 1, -1 do
-        if not tempTable[validNPCs[i]] then
-            table.remove(validNPCs, i)
-        end
-    end
-    for obj in pairs(tempTable) do
-        if not table.find(validNPCs, obj) then
-            table.insert(validNPCs, obj)
-        end
-    end
-end
-
-local function handleDescendant(descendant)
-    if isNPC(descendant) then
-        table.insert(validNPCs, descendant)
-        local humanoid = descendant:WaitForChild("Humanoid")
-        humanoid.Destroying:Connect(function()
-            for i = #validNPCs, 1, -1 do
-                if validNPCs[i] == descendant then
-                    table.remove(validNPCs, i)
-                    break
-                end
-            end
-        end)
-    end
-end
-
-workspace.DescendantAdded:Connect(handleDescendant)
-
-local function updateDrawings()
-    FOVring.Position = Cam.ViewportSize / 2
-    FOVring.Radius = fov * (Cam.ViewportSize.Y / 1080)
+	table.clear(validNPCs)
+	for _, obj in ipairs(workspace:GetChildren()) do
+		if isNPC(obj) then
+			table.insert(validNPCs, obj)
+		end
+	end
 end
 
 local function predictPos(target)
-    local rootPart = target:FindFirstChild("HumanoidRootPart")
-    local head = target:FindFirstChild("Head")
-    if not rootPart or not head then
-        return head and head.Position or rootPart and rootPart.Position
-    end
-    local velocity = rootPart.Velocity
-    local predictionTime = 0.02
-    local basePosition = rootPart.Position + velocity * predictionTime
-    local headOffset = head.Position - rootPart.Position
-    return basePosition + headOffset
+	local root = target:FindFirstChild("HumanoidRootPart")
+	local head = target:FindFirstChild("Head")
+	if not (root and head) then return nil end
+	local velocity = root.Velocity or Vector3.new()
+	local predictionTime = 0.02
+	local predictedRoot = root.Position + velocity * predictionTime
+	local headOffset = head.Position - root.Position
+	return predictedRoot + headOffset
 end
 
+-- Efficient raycast visibility check
+local function isVisible(npc, targetPos)
+	local origin = Cam.CFrame.Position
+	local direction = (targetPos - origin)
+	local dist = direction.Magnitude
+	if dist <= 0 then return false end
+
+	local filters = {}
+	if Player.Character then table.insert(filters, Player.Character) end
+	raycastParams.FilterDescendantsInstances = filters
+
+	local ray = workspace:Raycast(origin, direction.Unit * dist, raycastParams)
+	return (not ray) or (ray.Instance and ray.Instance:IsDescendantOf(npc))
+end
+
+-- Light targeting
 local function getTarget()
-    local nearest = nil
-    local minDistance = math.huge
-    local viewportCenter = Cam.ViewportSize / 2
-    raycastParams.FilterDescendantsInstances = {Player.Character}
-    for _, npc in ipairs(validNPCs) do
-        local predictedPos = predictPos(npc)
-        local screenPos, visible = Cam:WorldToViewportPoint(predictedPos)
-        if visible and screenPos.Z > 0 then
-            local ray = workspace:Raycast(
-                Cam.CFrame.Position,
-                (predictedPos - Cam.CFrame.Position).Unit * 1000,
-                raycastParams
-            )
-            if ray and ray.Instance:IsDescendantOf(npc) then
-                local distance = (Vector2.new(screenPos.X, screenPos.Y) - viewportCenter).Magnitude
-                if distance < minDistance and distance < fov then
-                    minDistance = distance
-                    nearest = npc
-                end
-            end
-        end
-    end
-    return nearest
+	local nearest, minDist = nil, math.huge
+	local center = Cam.ViewportSize / 2
+
+	for _, npc in ipairs(visibleNPCs) do
+		local aimPos = predictPos(npc)
+		if aimPos then
+			local screenPos, onScreen = Cam:WorldToViewportPoint(aimPos)
+			if onScreen and screenPos.Z > 0 then
+				local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+				if dist < fov and dist < minDist then
+					minDist = dist
+					nearest = npc
+				end
+			end
+		end
+	end
+
+	return nearest
 end
 
-local function aim(targetPosition)
-    local currentCF = Cam.CFrame
-    local targetDirection = (targetPosition - currentCF.Position).Unit
-    local smoothFactor = 0.581
-    local newLookVector = currentCF.LookVector:Lerp(targetDirection, smoothFactor)
-    Cam.CFrame = CFrame.new(currentCF.Position, currentCF.Position + newLookVector)
+local function aimAt(worldPos)
+	local cf = Cam.CFrame
+	local dir = (worldPos - cf.Position).Unit
+	local smooth = 0.581
+	local newVec = cf.LookVector:Lerp(dir, smooth)
+	Cam.CFrame = CFrame.new(cf.Position, cf.Position + newVec)
 end
 
-local heartbeat = RunService.Heartbeat
-local lastUpdate = 0
-local UPDATE_INTERVAL = 0.4
+-- Raycast visibility caching (runs rarely)
+local function updateVisibleNPCs()
+	table.clear(visibleNPCs)
+	for _, npc in ipairs(validNPCs) do
+		if npc and npc.Parent and npc:FindFirstChild("Humanoid") and npc.Humanoid.Health > 0 then
+			local p = predictPos(npc)
+			if p and isVisible(npc, p) then
+				table.insert(visibleNPCs, npc)
+			end
+		end
+	end
+end
 
-heartbeat:Connect(function(dt)
-    updateDrawings()
-    lastUpdate = lastUpdate + dt
-    if lastUpdate >= UPDATE_INTERVAL then
-        updateNPCs()
-        lastUpdate = 0
-    end
-    if isAiming then
-        local target = getTarget()
-        if target then
-            local predictedPosition = predictPos(target)
-            aim(predictedPosition)
-        end
-    end
-end)
+-- Heartbeat (only active when ON)
+local hbConn
+local function startAimbot()
+	if hbConn then return end
+	FOVring.Visible = true
+	updateNPCs()
+	updateVisibleNPCs()
+	lastNPCUpdate = 0
+	lastRayUpdate = 0
+
+	hbConn = RunService.Heartbeat:Connect(function(dt)
+		FOVring.Position = Cam.ViewportSize / 2
+		FOVring.Radius = fov * (Cam.ViewportSize.Y / 1080)
+
+		lastNPCUpdate += dt
+		lastRayUpdate += dt
+
+		-- update NPCs less often
+		if lastNPCUpdate >= UPDATE_NPC_INTERVAL then
+			updateNPCs()
+			lastNPCUpdate = 0
+		end
+
+		-- update visibility cache less often (raycasts)
+		if lastRayUpdate >= UPDATE_RAYCAST_INTERVAL then
+			updateVisibleNPCs()
+			lastRayUpdate = 0
+		end
+
+		local target = getTarget()
+		if target then
+			local p = predictPos(target)
+			if p then aimAt(p) end
+		end
+	end)
+end
+
+local function stopAimbot()
+	if hbConn then hbConn:Disconnect() hbConn = nil end
+	FOVring.Visible = false
+end
 
 local function toggleAimbot()
-    isAiming = not isAiming
-    FOVring.Visible = isAiming
-    ToggleButton.Text = "AIMBOT: " .. (isAiming and "ON" or "OFF")
-    ToggleButton.TextColor3 = isAiming and Color3.fromRGB(50, 255, 50) or Color3.fromRGB(255, 50, 50)
+	isAiming = not isAiming
+	if isAiming then
+		startAimbot()
+	else
+		stopAimbot()
+	end
+	ToggleButton.Text = "AIMASSIST: " .. (isAiming and "ON" or "OFF")
+	ToggleButton.TextColor3 = isAiming and Color3.fromRGB(50,255,50) or Color3.fromRGB(255,50,50)
 end
 
 ToggleButton.MouseButton1Click:Connect(toggleAimbot)
-
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if not gameProcessed and input.KeyCode == Enum.KeyCode.T then
-        toggleAimbot()
-    end
+UserInputService.InputBegan:Connect(function(input, gpe)
+	if not gpe and input.KeyCode == Enum.KeyCode.T then toggleAimbot() end
 end)
 
+-- Drag GUI
 local dragging, dragInput, dragStart, startPos
-
 local function update(input)
-    local delta = input.Position - dragStart
-    ToggleButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	local delta = input.Position - dragStart
+	ToggleButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+		startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 end
-
 ToggleButton.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = ToggleButton.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
-    end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true
+		dragStart = input.Position
+		startPos = ToggleButton.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
+	end
 end)
-
 ToggleButton.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        dragInput = input
-    end
+	if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end
 end)
-
 UserInputService.InputChanged:Connect(function(input)
-    if input == dragInput and dragging then
-        update(input)
-    end
+	if input == dragInput and dragging then update(input) end
 end)
 
 updateNPCs()
-workspace.DescendantRemoved:Connect(function(descendant)
-    if isNPC(descendant) then
-        for i = #validNPCs, 1, -1 do
-            if validNPCs[i] == descendant then
-                table.remove(validNPCs, i)
-                break
-            end
-        end
-    end
-end)
-
-game:GetService("Players").PlayerRemoving:Connect(function()
-    FOVring:Remove()
-    ScreenGui:Destroy()
+Players.PlayerRemoving:Connect(function()
+	pcall(function() FOVring:Remove() end)
+	pcall(function() ScreenGui:Destroy() end)
 end)
